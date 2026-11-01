@@ -34,6 +34,7 @@ fn halves(w: u32, h: u32, par: (u32, u32)) -> Halves {
     let px: Vec<u8> = (0..w * h).flat_map(|i| if i % w < w / 2 { [255, 0, 0, 255] } else { [0, 0, 255, 255] }).collect();
     let frame = Arc::new(VideoFrame { par, ..VideoFrame::rgba8(w, h, px) });
     let info = MediaInfo {
+        spherical: None,
         name: "halves".into(),
         kind: MediaKind::Movie,
         duration: Tick(10 * TICKS_PER_SECOND),

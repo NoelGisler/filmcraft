@@ -209,6 +209,7 @@ impl MpegSource {
         }
         let mut src = MpegSource {
             info: MediaInfo {
+                spherical: None,
                 name: name.to_string(),
                 kind: MediaKind::Movie,
                 duration: Tick::ZERO,
@@ -314,6 +315,7 @@ impl MpegSource {
         };
         let mut src = MpegSource {
             info: MediaInfo {
+                spherical: None,
                 name: name.to_string(),
                 kind: MediaKind::Movie,
                 duration: Tick::ZERO,

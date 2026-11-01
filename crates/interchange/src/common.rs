@@ -276,6 +276,7 @@ pub(crate) fn media_info(name: &str, spec: &MediaSpec) -> MediaInfo {
         _ => MediaKind::Movie,
     });
     MediaInfo {
+        spherical: None,
         name: name.to_string(),
         kind,
         duration: spec.duration.unwrap_or(Tick::ZERO),
@@ -807,6 +808,7 @@ mod tests {
     fn subclip_cycle_resolution_is_bounded() {
         let mut p = Project::new("Cycle Test");
         let info = MediaInfo {
+            spherical: None,
             name: "clip.mp4".into(),
             kind: MediaKind::Movie,
             duration: Tick(100_000),

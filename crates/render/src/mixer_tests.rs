@@ -53,6 +53,7 @@ fn audio_clips_from_one_container_mix_distinct_streams() {
     let mut p = Project::new("streams");
     let seq = p.new_sequence("mix", SequenceSettings::default(), 0, 2, None);
     let mut info = MediaInfo {
+        spherical: None,
         name: "two.mov".into(),
         kind: MediaKind::AudioOnly,
         duration: Tick(TICKS_PER_SECOND),
@@ -654,6 +655,7 @@ fn nested_tone(inner_rate: u32) -> (Project, ItemId, SourceMap, Arc<Tone>) {
     let mut p = Project::new("nest");
     let ten = TimeRange::new(Tick::ZERO, Tick(10 * TICKS_PER_SECOND));
     let info = MediaInfo {
+        spherical: None,
         name: "tone".into(),
         kind: MediaKind::AudioOnly,
         duration: ten.duration,

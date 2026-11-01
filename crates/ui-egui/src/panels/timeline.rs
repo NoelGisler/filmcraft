@@ -894,6 +894,7 @@ mod trim_preview_tests {
     #[test]
     fn each_audio_stream_gets_its_own_waveform_peaks() {
         let info = filmcraft_media::MediaInfo {
+            spherical: None,
             name: "two.mkv".into(),
             kind: filmcraft_media::MediaKind::Movie,
             duration: Tick(TICKS_PER_SECOND),

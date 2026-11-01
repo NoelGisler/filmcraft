@@ -37,6 +37,7 @@ fn err(name: &str, what: &str) -> MediaError {
 pub fn still(name: &str, bytes: &[u8]) -> Result<StillSource> {
     let frame = decode(name, bytes)?;
     let info = MediaInfo {
+        spherical: None,
         name: name.to_string(),
         kind: MediaKind::Still,
         duration: DEFAULT_STILL_DURATION,

@@ -11,6 +11,7 @@ use std::ops::Range;
 
 pub fn media_info(name: &str, video: bool, audio: bool, rate: FrameRate, secs: i64) -> filmcraft_media::MediaInfo {
     filmcraft_media::MediaInfo {
+        spherical: None,
         name: name.into(),
         kind: if video { MediaKind::Movie } else { MediaKind::AudioOnly },
         duration: Tick(secs * filmcraft_time::TICKS_PER_SECOND),

@@ -13,6 +13,7 @@ use super::*;
 fn project() -> (Project, ItemId) {
     let mut p = Project::new("t");
     let info = filmcraft_media::MediaInfo {
+        spherical: None,
         name: "a.mov".into(),
         kind: filmcraft_media::MediaKind::Movie,
         duration: FrameRate::FPS_24.tick_of(2400),

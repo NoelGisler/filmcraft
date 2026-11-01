@@ -111,6 +111,7 @@ impl GeneratorSource {
         let audio =
             generator.has_audio().then(|| AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "PCM (synthetic)".into(), bits_per_sample: Some(32) });
         let info = MediaInfo {
+            spherical: None,
             name: generator.label(),
             kind: if matches!(generator, Generator::Demo(_)) { MediaKind::Movie } else { MediaKind::Synthetic },
             duration,

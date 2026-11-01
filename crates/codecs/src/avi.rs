@@ -406,6 +406,7 @@ impl AviSource {
             .max()
             .unwrap_or_default();
         let info = MediaInfo {
+            spherical: None,
             name: name.to_string(),
             kind: if video.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly },
             duration: vdur.max(adur),

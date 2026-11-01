@@ -52,6 +52,7 @@ impl Rig {
         let mut map = SourceMap::default();
         for (k, f) in signals.iter().enumerate() {
             let info = MediaInfo {
+                spherical: None,
                 name: format!("sig{k}"),
                 kind: MediaKind::AudioOnly,
                 duration: Tick(10 * TICKS_PER_SECOND),

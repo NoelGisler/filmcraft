@@ -76,12 +76,51 @@ pub struct Mp4Source {
     bytes: crate::Src,
     file: Mp4File,
     vtrack: Option<usize>,
+    /// For dual-fisheye 360° files (DJI `.OSV`): the tracks of lens 0 and lens 1, in file order.
+    /// Lens 0 is `vtrack`; lens 1 is recognised but not yet decoded (docs/osv-notes.md).
+    lenses: Option<[usize; 2]>,
     video: GopCache,
     /// Look frames up by the start of their frame: the video track's timestamp unit is half a frame
     /// or longer and its samples sit on the nominal frame grid ([`crate::gop::snap_coarse_units`]).
     snap: bool,
     /// The playable audio tracks in file order: `info.audio_streams[k]` describes `audios[k]`.
     audios: Vec<Mp4Audio>,
+}
+
+/// Most video tracks looked at when deciding whether a file is dual-fisheye (the count comes from
+/// the file: never trusted).
+const MAX_LENS_TRACKS: usize = 8;
+
+/// A video track's picture size: the sample entry's, or the track header's when the entry has none.
+fn track_size(t: &filmcraft_isobmff::Track) -> (u32, u32) {
+    match t.entries.first().and_then(|e| e.video.as_ref()) {
+        Some(v) if v.width > 0 && v.height > 0 => (u32::from(v.width), u32::from(v.height)),
+        _ => (t.width, t.height),
+    }
+}
+
+/// The two lens tracks of a dual-fisheye 360° file, or `None` for ordinary video.
+///
+/// A file is dual-fisheye when it is named `.osv` (DJI Osmo 360) and has exactly two playable video
+/// tracks of a known codec, both with the same codec and the same non-zero picture size: one per
+/// lens. Anything else
+/// (one lens, a third video track, lenses that disagree) is imported as ordinary video from its
+/// first video track, so an odd or damaged file still opens. Other tracks (audio, DJI metadata,
+/// timecode) don't take part.
+fn dual_fisheye_lenses(name: &str, file: &Mp4File, video_tracks: &[usize]) -> Option<[usize; 2]> {
+    let is_osv = std::path::Path::new(name).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("osv"));
+    if !is_osv {
+        return None;
+    }
+    // a track whose codec we don't know (metadata declared as video, say) is never a lens
+    let known = |&&i: &&usize| file.tracks.get(i).and_then(|t| t.entries.first()).is_some_and(|e| !matches!(e.codec, CodecConfig::Unknown { .. }));
+    let lens_tracks: Vec<usize> = video_tracks.iter().filter(known).copied().collect();
+    let &[a, b] = lens_tracks.as_slice() else { return None };
+    let (ta, tb) = (file.tracks.get(a)?, file.tracks.get(b)?);
+    let (ea, eb) = (ta.entries.first()?, tb.entries.first()?);
+    let size = track_size(ta);
+    let same_codec = std::mem::discriminant(&ea.codec) == std::mem::discriminant(&eb.codec) && ea.format == eb.format;
+    (same_codec && size.0 > 0 && size.1 > 0 && size == track_size(tb)).then_some([a, b])
 }
 
 pub fn sniff(b: &[u8]) -> bool {
@@ -264,7 +303,10 @@ impl Mp4Source {
         // A track needs samples, a sample description and a timescale to be playable (damaged
         // files can lack them: indexing `entries[0]` or dividing by the timescale used to panic).
         let playable = |t: &&filmcraft_isobmff::Track, kind| t.kind == kind && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0;
-        let vtrack = file.tracks.iter().position(|t| playable(&t, TrackKind::Video));
+        let video_tracks: Vec<usize> =
+            file.tracks.iter().enumerate().filter(|(_, t)| playable(t, TrackKind::Video)).map(|(i, _)| i).take(MAX_LENS_TRACKS).collect();
+        let vtrack = video_tracks.first().copied();
+        let lenses = dual_fisheye_lenses(name, &file, &video_tracks);
         // every audio track is a stream (the track count comes from the file: capped)
         let atracks: Vec<usize> =
             file.tracks.iter().enumerate().filter(|(_, t)| playable(t, TrackKind::Audio)).map(|(i, _)| i).take(filmcraft_media::MAX_AUDIO_STREAMS).collect();
@@ -360,6 +402,7 @@ impl Mp4Source {
         // track; convert its fields to a frame count using the video frame rate.
         let start_timecode = start_timecode.or_else(|| rtmd_start_timecode(&file, &bytes, video.as_ref()?.frame_rate));
         let info = MediaInfo {
+            spherical: lenses.map(|_| filmcraft_media::SphericalLayout::DualFisheye),
             name: name.to_string(),
             kind: if video.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly },
             duration,
@@ -394,7 +437,13 @@ impl Mp4Source {
             let t = &file.tracks[i];
             crate::gop::snap_coarse_units(t.samples.iter().map(|s| s.pts.saturating_add(t.edit_offset)), 1, i64::from(t.timescale), v.frame_rate)
         });
-        Ok(Self { info, bytes, file, vtrack, video: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture), snap, audios })
+        Ok(Self { info, bytes, file, vtrack, lenses, video: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture), snap, audios })
+    }
+
+    /// The track indices (into the container's track list) of lens 0 and lens 1 when the file is
+    /// dual-fisheye 360° ([`MediaInfo::spherical`]); `None` for ordinary video.
+    pub fn fisheye_lens_tracks(&self) -> Option<[usize; 2]> {
+        self.lenses
     }
 
     fn read(&self, track: usize, i: usize) -> crate::Result<Vec<u8>> {
@@ -926,6 +975,8 @@ pub fn reader_opener(name: &str, head: &[u8], reader: &filmcraft_media::SharedRe
     Some(Mp4Source::open_reader(name, reader.clone()).map(|s| Arc::new(s) as SharedSource).map_err(Into::into))
 }
 
+#[cfg(test)]
+mod osv_tests;
 #[cfg(test)]
 mod tests;
 

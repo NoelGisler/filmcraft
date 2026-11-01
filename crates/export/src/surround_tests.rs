@@ -42,6 +42,7 @@ impl MediaSource for Tones6 {
 fn surround() -> (Arc<Project>, ItemId, SourceMap) {
     let mut p = Project::new("51");
     let info = MediaInfo {
+        spherical: None,
         name: "tones51".into(),
         kind: MediaKind::AudioOnly,
         duration: Tick(2 * TICKS_PER_SECOND),

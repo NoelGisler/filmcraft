@@ -364,6 +364,7 @@ impl MxfSource {
             _ => Tick::ZERO,
         };
         let mut info = MediaInfo {
+            spherical: None,
             name: name.to_string(),
             kind: if video.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly },
             duration,

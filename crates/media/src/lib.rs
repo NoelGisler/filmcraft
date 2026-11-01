@@ -161,6 +161,29 @@ pub struct MediaInfo {
     /// Timecode of the first frame (in frames at `video.frame_rate`), if the file carries one.
     pub start_timecode: Option<i64>,
     pub file_size: Option<u64>,
+    /// How the picture maps onto a sphere, for 360° footage. `None` for ordinary flat video.
+    /// Project files written before 360° support have no such key and load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spherical: Option<SphericalLayout>,
+}
+
+/// The spherical (360°) layout of a clip's video.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SphericalLayout {
+    /// Two fisheye lenses recorded as two separate video streams of equal size and codec, one per
+    /// lens (e.g. DJI Osmo 360 `.OSV`). [`MediaInfo::video`] describes lens 0; the source decodes
+    /// lens 0 only until stitching exists.
+    DualFisheye,
+}
+
+impl SphericalLayout {
+    /// Short human-readable label for the project panel and clip properties.
+    pub fn label(self) -> &'static str {
+        match self {
+            SphericalLayout::DualFisheye => "dual-fisheye 360",
+        }
+    }
 }
 
 /// Reads `audio_streams` from a list, or from the single optional stream older project files wrote.
@@ -229,6 +252,8 @@ pub const STILL_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "ti
 pub const AUDIO_EXTENSIONS: &[&str] = &["wav", "wave", "bwf", "aif", "aiff", "mp3", "mp2", "m4a", "aac", "flac", "ogg", "opus"];
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "m4v", "mov", "mkv", "webm", "avi", "mxf", "mts", "m2ts", "m2t", "ts", "mpg", "mpeg", "vob", "mod", "tod", "m2v", "m1v", "mpv", "3gp", "y4m", "apv",
+    // DJI Osmo 360: ISO BMFF with one HEVC track per fisheye lens (docs/osv-notes.md)
+    "osv",
 ];
 
 pub fn is_importable(path: &Path) -> bool {
@@ -305,10 +330,35 @@ mod importable_tests {
 
     #[test]
     fn camera_extensions_match_regardless_of_case() {
-        for name in ["clip.mov", "clip.MOV", "clip.Mov", "shot.MP4", "IMG_0001.JPG", "sound.WAV", "take.M2TS"] {
+        for name in ["clip.mov", "clip.MOV", "clip.Mov", "shot.MP4", "IMG_0001.JPG", "sound.WAV", "take.M2TS", "CAM_0001.OSV", "clip.osv"] {
             assert!(is_importable(Path::new(name)), "{name}");
         }
         assert!(!is_importable(Path::new("notes.txt")));
+    }
+
+    /// Project files store `MediaInfo`: those written before 360° support have no `spherical` key
+    /// and load as flat video, and flat video writes no key (older builds read the files we write).
+    #[test]
+    fn spherical_layout_is_optional_in_project_files() {
+        let flat = MediaInfo {
+            name: "a.mp4".into(),
+            kind: MediaKind::Movie,
+            duration: Tick::ZERO,
+            video: None,
+            audio_streams: Vec::new(),
+            container: "MPEG-4".into(),
+            start_timecode: None,
+            file_size: None,
+            spherical: None,
+        };
+        let json = serde_json::to_value(&flat).unwrap();
+        assert!(json.get("spherical").is_none(), "{json}");
+        assert_eq!(serde_json::from_value::<MediaInfo>(json).unwrap(), flat);
+
+        let osv = MediaInfo { name: "a.osv".into(), spherical: Some(SphericalLayout::DualFisheye), ..flat };
+        let json = serde_json::to_value(&osv).unwrap();
+        assert_eq!(json["spherical"], "DualFisheye");
+        assert_eq!(serde_json::from_value::<MediaInfo>(json).unwrap(), osv);
     }
 
     #[test]
