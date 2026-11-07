@@ -106,6 +106,7 @@ impl OggSource {
             Kind::Pcm { samples, .. } => samples.first().map_or(0, Vec::len) as i64,
         };
         let info = MediaInfo {
+            spherical: None,
             name: name.to_string(),
             kind: MediaKind::AudioOnly,
             duration: Tick::from_units(frames, rate as i64),

@@ -128,6 +128,7 @@ impl WavSource {
         let frames = dlen / frame_bytes;
         let time_reference = bext_tr.or(ixml_tr);
         let mut info = MediaInfo {
+            spherical: None,
             name: name.into(),
             kind: MediaKind::AudioOnly,
             duration: Tick::from_units(i64::try_from(frames).unwrap_or(i64::MAX), rate as i64),

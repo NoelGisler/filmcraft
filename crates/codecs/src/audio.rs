@@ -878,6 +878,7 @@ impl AudioFileSource {
         {
             let frames = samples.first().map_or(0, Vec::len);
             let info = MediaInfo {
+                spherical: None,
                 name: name.to_string(),
                 kind: MediaKind::AudioOnly,
                 duration: Tick::from_units(frames as i64, rate as i64),
@@ -893,6 +894,7 @@ impl AudioFileSource {
             let (rate, samples) = decode_adts(&bytes)?.ok_or_else(|| CodecError::Decode(format!("{name}: no ADTS AAC frames")))?;
             let frames = samples.first().map_or(0, Vec::len);
             let info = MediaInfo {
+                spherical: None,
                 name: name.to_string(),
                 kind: MediaKind::AudioOnly,
                 duration: Tick::from_units(frames as i64, rate as i64),
@@ -936,6 +938,7 @@ impl AudioFileSource {
         let codec_name =
             symphonia::default::get_codecs().get_codec(track.codec_params.codec).map(|d| d.short_name.to_uppercase()).unwrap_or_else(|| ext.to_uppercase());
         let info = MediaInfo {
+            spherical: None,
             name: name.to_string(),
             kind: MediaKind::AudioOnly,
             duration: Tick::from_units(frames as i64, rate as i64),

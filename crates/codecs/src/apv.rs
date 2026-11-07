@@ -99,6 +99,7 @@ impl ApvSource {
             None => "APV".into(),
         };
         let info = MediaInfo {
+            spherical: None,
             name: name.to_string(),
             kind: MediaKind::Movie,
             duration,

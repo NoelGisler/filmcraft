@@ -153,6 +153,7 @@ pub(super) fn offline_file(s: &mut Session, p: &Value) -> Result<Value> {
         .unwrap_or_else(|| "Offline.mov".into());
     let name = str_p(p, "name").map(str::to_string).filter(|n| !n.is_empty()).unwrap_or_else(|| file_name.clone());
     let info = filmcraft_media::MediaInfo {
+        spherical: None,
         name: file_name.clone(),
         kind: if has_v { filmcraft_media::MediaKind::Movie } else { filmcraft_media::MediaKind::AudioOnly },
         duration,

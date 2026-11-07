@@ -205,6 +205,7 @@ mod tests {
 
     fn media(p: &mut Project, name: &str, rate: FrameRate, seconds: i64, tc: Option<i64>, audio: u32) -> ItemId {
         let info = MediaInfo {
+            spherical: None,
             name: name.into(),
             kind: MediaKind::Movie,
             duration: rate.tick_of(seconds * 24),

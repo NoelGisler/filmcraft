@@ -145,6 +145,7 @@ impl ImageSequenceSource {
         let ext = first.rsplit('.').next().unwrap_or("image").to_ascii_uppercase();
         let n = frames.len() as i64;
         let info = MediaInfo {
+            spherical: None,
             name: name.to_string(),
             kind: MediaKind::ImageSequence,
             duration: rate.tick_of(n),

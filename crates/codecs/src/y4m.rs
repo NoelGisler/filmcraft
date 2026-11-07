@@ -183,6 +183,7 @@ impl Y4mSource {
         let duration = Tick::from_rational(frames.len() as i64, rate.den, rate.num);
         let bitrate = (frame_bytes as u64 * 8).checked_mul(rate.num as u64).map(|b| b / rate.den as u64);
         let info = MediaInfo {
+            spherical: None,
             name: name.to_string(),
             kind: MediaKind::Movie,
             duration,

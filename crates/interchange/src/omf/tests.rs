@@ -13,6 +13,7 @@ use crate::essence::{AudioEssence, EssenceData, NeedOptions, audio_needs};
 fn project() -> (Project, ItemId) {
     let mut p = Project::new("t");
     let info = filmcraft_media::MediaInfo {
+        spherical: None,
         name: "a.wav".into(),
         kind: filmcraft_media::MediaKind::AudioOnly,
         duration: FrameRate::FPS_25.tick_of(2500),

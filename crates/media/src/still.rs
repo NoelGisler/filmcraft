@@ -102,6 +102,7 @@ impl StillSource {
     pub fn from_rgba(name: &str, w: u32, h: u32, rgba: Vec<u8>, has_alpha: bool, file_size: u64) -> Self {
         let codec = name.rsplit('.').next().unwrap_or("image").to_ascii_uppercase();
         let info = MediaInfo {
+            spherical: None,
             name: name.to_string(),
             kind: MediaKind::Still,
             duration: DEFAULT_STILL_DURATION,

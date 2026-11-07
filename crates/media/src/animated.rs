@@ -166,6 +166,7 @@ impl AnimatedSource {
             t = Tick(t.0.saturating_add(d.0));
         }
         let info = MediaInfo {
+            spherical: None,
             name: name.to_string(),
             kind: MediaKind::Movie,
             duration: t,

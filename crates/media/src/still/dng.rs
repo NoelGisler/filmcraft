@@ -59,6 +59,7 @@ pub fn decode(name: &str, bytes: &[u8]) -> Result<Decoded> {
 pub fn still(name: &str, bytes: &[u8]) -> Result<StillSource> {
     let d = decode(name, bytes)?;
     let info = MediaInfo {
+        spherical: None,
         name: name.to_string(),
         kind: MediaKind::Still,
         duration: DEFAULT_STILL_DURATION,
