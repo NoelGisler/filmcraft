@@ -77,14 +77,28 @@ pub struct Mp4Source {
     file: Mp4File,
     vtrack: Option<usize>,
     /// For dual-fisheye 360° files (DJI `.OSV`): the tracks of lens 0 and lens 1, in file order.
-    /// Lens 0 is `vtrack`; lens 1 is recognised but not yet decoded (docs/osv-notes.md).
+    /// Lens 0 is `vtrack` (decoded by `video`); lens 1 by `lens1` (docs/osv-notes.md).
     lenses: Option<[usize; 2]>,
     video: GopCache,
+    /// The second lens of a dual-fisheye file: its own decoder and cache, decoded beside lens 0.
+    lens1: Option<Lens1>,
     /// Look frames up by the start of their frame: the video track's timestamp unit is half a frame
     /// or longer and its samples sit on the nominal frame grid ([`crate::gop::snap_coarse_units`]).
     snap: bool,
     /// The playable audio tracks in file order: `info.audio_streams[k]` describes `audios[k]`.
     audios: Vec<Mp4Audio>,
+}
+
+/// Lens 1 of a dual-fisheye file (lens 0 is the source's ordinary video track).
+struct Lens1 {
+    /// Index into `Mp4File::tracks`.
+    track: usize,
+    cache: GopCache,
+    /// As [`Mp4Source::snap`], for this track's own timestamps.
+    snap: bool,
+    /// The last side-by-side frame and the two lens frames it was made of: a monitor asking for
+    /// the same time again (a redraw, a paused playhead) gets it without copying both lenses.
+    stacked: Mutex<Option<[Arc<VideoFrame>; 3]>>,
 }
 
 /// Most video tracks looked at when deciding whether a file is dual-fisheye (the count comes from
@@ -401,6 +415,13 @@ impl Mp4Source {
         // Sony XAVC files with no `tmcd` track carry the start timecode in an `rtmd` metadata
         // track; convert its fields to a frame count using the video frame rate.
         let start_timecode = start_timecode.or_else(|| rtmd_start_timecode(&file, &bytes, video.as_ref()?.frame_rate));
+        // A dual-fisheye file plays both lenses side by side in one frame twice as wide (lens 0
+        // left). A width that would overflow plays lens 0 alone, as flat video.
+        let mut video = video;
+        let lenses = lenses.filter(|_| match video.as_mut() {
+            Some(v) => v.width.checked_mul(2).map(|w| v.width = w).is_some(),
+            None => false,
+        });
         let info = MediaInfo {
             spherical: lenses.map(|_| filmcraft_media::SphericalLayout::DualFisheye),
             name: name.to_string(),
@@ -432,12 +453,27 @@ impl Mp4Source {
             })
             .collect();
         snap_to_frame_grid(&mut file, vtrack);
+        let lens1_track = lenses.map(|[_, b]| b);
+        // lens 1 is timed exactly like lens 0, so a time finds the frames the camera took together
+        snap_to_frame_grid(&mut file, lens1_track);
+        let offset_before = vtrack.and_then(|i| file.tracks.get(i)).map(|t| t.edit_offset);
         rebase_unedited_video(&mut file, vtrack, &mut audios);
-        let snap = vtrack.zip(info.video.as_ref()).is_some_and(|(i, v)| {
-            let t = &file.tracks[i];
-            crate::gop::snap_coarse_units(t.samples.iter().map(|s| s.pts.saturating_add(t.edit_offset)), 1, i64::from(t.timescale), v.frame_rate)
+        shift_like_lens_0(&mut file, vtrack, lens1_track, offset_before);
+        let snap_of = |i: usize| {
+            info.video.as_ref().zip(file.tracks.get(i)).is_some_and(|(v, t)| {
+                crate::gop::snap_coarse_units(t.samples.iter().map(|s| s.pts.saturating_add(t.edit_offset)), 1, i64::from(t.timescale), v.frame_rate)
+            })
+        };
+        let snap = vtrack.is_some_and(snap_of);
+        // One camera, one geometry: lens 1 gets lens 0's colour, clean aperture and rotation, so
+        // the two frames always have the same size.
+        let lens1 = lens1_track.map(|track| Lens1 {
+            track,
+            cache: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture),
+            snap: snap_of(track),
+            stacked: Mutex::new(None),
         });
-        Ok(Self { info, bytes, file, vtrack, lenses, video: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture), snap, audios })
+        Ok(Self { info, bytes, file, vtrack, lenses, video: GopCache::new(explicit_color).with_rotation(rotation).with_crop(aperture), lens1, snap, audios })
     }
 
     /// The track indices (into the container's track list) of lens 0 and lens 1 when the file is
@@ -452,11 +488,58 @@ impl Mp4Source {
 
     fn video_at(&self, t: Tick) -> crate::Result<Arc<VideoFrame>> {
         let ti = self.vtrack.ok_or_else(|| CodecError::Unsupported("no video".into()))?;
-        let ts = self.file.tracks[ti].timescale as i64;
+        self.track_frame(&self.video, ti, self.snap, self.lens1.is_some(), t)
+    }
+
+    /// The frame track `ti` (decoded by `cache`) shows at `t`. Both lenses of a dual-fisheye file
+    /// look their frame up from the same time through their own timescale: that pairs the
+    /// pictures the camera took together, whatever each track's units.
+    fn track_frame(&self, cache: &GopCache, ti: usize, snap: bool, lens: bool, t: Tick) -> crate::Result<Arc<VideoFrame>> {
+        let ts = self.file.tracks.get(ti).map(|t| i64::from(t.timescale)).ok_or_else(|| CodecError::Unsupported("no video".into()))?;
         let rate = self.info.video.as_ref().map(|v| v.frame_rate).unwrap_or_default();
-        let at = |t: Tick| crate::gop::lookup_time(t, 1, ts, rate, self.snap);
+        let at = |t: Tick| crate::gop::lookup_time(t, 1, ts, rate, snap);
         let late = filmcraft_media::cancel::catch_up().map(|m| at(t - m));
-        self.video.frame_late(&Mp4Video { src: self, track: ti }, at(t), late)
+        cache.frame_late(&Mp4Video { src: self, track: ti, lens }, at(t), late)
+    }
+
+    /// A dual-fisheye frame at `t`: lens 0 and lens 1, each decoded by its own decoder at the same
+    /// time (lens 1 on a thread of its own), side by side in one `2W`×`H` frame, lens 0 left. Each
+    /// lens seeks to its sync sample at or before `t` and decodes on to its frame there, as any
+    /// video track does; bit depth is kept ([`VideoFrame::hstack`]).
+    fn dual_video_at(&self, l1: &Lens1, t: Tick) -> crate::Result<Arc<VideoFrame>> {
+        let right_at = || self.track_frame(&l1.cache, l1.track, l1.snap, true, t);
+        let ctx = filmcraft_media::cancel::Context::current();
+        let (left, right) = std::thread::scope(|scope| {
+            let spawned = std::thread::Builder::new().name("decode-lens-1".into()).spawn_scoped(scope, move || {
+                // a panic in there becomes this frame's error (AGENTS.md §0.6)
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.run(right_at)))
+                    .unwrap_or_else(|_| Err(CodecError::Decode("internal error while decoding lens 1".into())))
+            });
+            let left = self.video_at(t);
+            let right = match spawned {
+                Ok(h) => h.join().unwrap_or_else(|_| Err(CodecError::Decode("internal error while decoding lens 1".into()))),
+                // no thread to run it on: decode lens 1 here, after lens 0
+                Err(_) => right_at(),
+            };
+            (left, right)
+        });
+        let (left, right) = (left?, right?);
+        let mut last = l1.stacked.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some([a, b, s]) = last.as_ref()
+            && Arc::ptr_eq(a, &left)
+            && Arc::ptr_eq(b, &right)
+        {
+            return Ok(s.clone());
+        }
+        let stacked = Arc::new(
+            VideoFrame::hstack(&left, &right)
+                .ok_or_else(|| CodecError::Decode("the two lens pictures can't be put side by side (size or format differ)".into()))?,
+        );
+        if let Some([_, _, old]) = last.replace([left, right, stacked.clone()]) {
+            // its planes serve the next side-by-side frame (unless a monitor still shows it)
+            filmcraft_frame::pool::recycle(old);
+        }
+        Ok(stacked)
     }
 
     /// Decoded packet `i` of audio stream `a` (`ainfo` is its `AudioStreamInfo`; `st` its decoder state).
@@ -515,6 +598,9 @@ impl Mp4Source {
 struct Mp4Video<'a> {
     src: &'a Mp4Source,
     track: usize,
+    /// A lens of a dual-fisheye file: when no decoder can be made for it as for any track (a
+    /// hardware decoder with no session left for a second stream), it decodes in software.
+    lens: bool,
 }
 
 impl VideoSamples for Mp4Video<'_> {
@@ -534,7 +620,14 @@ impl VideoSamples for Mp4Video<'_> {
         self.src.read(self.track, i)
     }
     fn make_decoder(&self) -> crate::Result<Box<dyn VideoDecoder>> {
-        make_video_decoder(&self.src.file.tracks[self.track].entries[0])
+        let entry = self.src.file.tracks.get(self.track).and_then(|t| t.entries.first()).ok_or_else(|| CodecError::Unsupported("no video".into()))?;
+        match make_video_decoder(entry) {
+            Err(e) if self.lens => {
+                log::info!("lens track {}: {e}; decoding it in software", self.track);
+                crate::software_video_decoder(entry)
+            }
+            r => r,
+        }
     }
 }
 
@@ -544,7 +637,11 @@ impl MediaSource for Mp4Source {
     }
 
     fn video_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>, MediaError> {
-        let f = self.video_at(req.time.max(Tick::ZERO))?;
+        let t = req.time.max(Tick::ZERO);
+        let f = match &self.lens1 {
+            Some(l1) => self.dual_video_at(l1, t)?,
+            None => self.video_at(t)?,
+        };
         Ok(f)
     }
 
@@ -945,6 +1042,23 @@ fn rebase_unedited_video(file: &mut Mp4File, vtrack: Option<usize>, audios: &mut
     let v = if shift == video_start { first } else { shift.to_rational_round(1, vts) };
     if let Some(t) = file.tracks.get_mut(vi) {
         t.edit_offset = t.edit_offset.saturating_sub(v);
+    }
+}
+
+/// Move lens 1 (`lens1`) on the presentation timeline by as much as [`rebase_unedited_video`] moved
+/// lens 0 (`vtrack`, whose offset was `before`), in its own timescale: the two lenses keep the
+/// timing the file gives them relative to each other.
+fn shift_like_lens_0(file: &mut Mp4File, vtrack: Option<usize>, lens1: Option<usize>, before: Option<i64>) {
+    let (Some(v), Some(l), Some(before)) = (vtrack, lens1, before) else { return };
+    let Some(t0) = file.tracks.get(v).filter(|t| t.timescale > 0) else { return };
+    let moved = before.saturating_sub(t0.edit_offset);
+    if moved == 0 {
+        return;
+    }
+    let shift = Tick::from_rational(moved, 1, i64::from(t0.timescale));
+    if let Some(t1) = file.tracks.get_mut(l).filter(|t| t.timescale > 0) {
+        let d = shift.to_rational_round(1, i64::from(t1.timescale));
+        t1.edit_offset = t1.edit_offset.saturating_sub(d);
     }
 }
 

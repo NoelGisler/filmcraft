@@ -274,6 +274,95 @@ impl VideoFrame {
         VideoFrame { width, height, data, color: self.color, par, pts: self.pts }
     }
 
+    /// `left` and `right` side by side in one `2W`×`H` frame (a dual-fisheye 360° picture: lens 0
+    /// left, lens 1 right). Both must have the same size and the same layout (planar Y'CbCr with the
+    /// same chroma subsampling, or the same RGBA format). Bit depth is kept: two 10-bit frames give a
+    /// 10-bit frame, and an 8-bit with a deeper one (a hardware and a software decoder) widens the
+    /// 8-bit samples to the deeper depth, never the other way. Alpha is kept when either side has it
+    /// (the other side opaque). Colour, pixel aspect and pts are `left`'s.
+    ///
+    /// `None` when the frames can't be put side by side (sizes, chroma or formats that differ, a
+    /// width that splits a subsampled chroma sample, planes shorter than their size says, or a size
+    /// that overflows).
+    pub fn hstack(left: &VideoFrame, right: &VideoFrame) -> Option<VideoFrame> {
+        if (left.width, left.height) != (right.width, right.height) || left.width == 0 || left.height == 0 {
+            return None;
+        }
+        let (w, h) = (left.width as usize, left.height as usize);
+        let width = left.width.checked_mul(2)?;
+        let data = match (&left.data, &right.data) {
+            (PixelData::Rgba8(a), PixelData::Rgba8(b)) => PixelData::Rgba8(Arc::new(hstack_plane(a, b, w, h, 4, Vec::new())?)),
+            (PixelData::RgbaF32(a), PixelData::RgbaF32(b)) => PixelData::RgbaF32(Arc::new(hstack_plane(a, b, w, h, 4, Vec::new())?)),
+            (PixelData::Yuv8 { planes: pa, chroma: ca, alpha: aa }, PixelData::Yuv8 { planes: pb, chroma: cb, alpha: ab }) if ca == cb => {
+                let (cw, ch) = stacked_chroma_size(*ca, w, h)?;
+                PixelData::Yuv8 {
+                    planes: [
+                        Arc::new(hstack_plane(&pa[0], &pb[0], w, h, 1, pool::take_u8(2 * w * h))?),
+                        Arc::new(hstack_plane(&pa[1], &pb[1], cw, ch, 1, pool::take_u8(2 * cw * ch))?),
+                        Arc::new(hstack_plane(&pa[2], &pb[2], cw, ch, 1, pool::take_u8(2 * cw * ch))?),
+                    ],
+                    chroma: *ca,
+                    alpha: hstack_alpha(aa.as_deref().map(Vec::as_slice), ab.as_deref().map(Vec::as_slice), w, h, u8::MAX)?.map(Arc::new),
+                }
+            }
+            (PixelData::Yuv8 { .. } | PixelData::Yuv16 { .. }, PixelData::Yuv8 { .. } | PixelData::Yuv16 { .. }) => {
+                let (pa, ca, ba, aa) = left.yuv16_view()?;
+                let (pb, cb, bb, ab) = right.yuv16_view()?;
+                if ca != cb {
+                    return None;
+                }
+                let bits = ba.max(bb);
+                let (cw, ch) = stacked_chroma_size(ca, w, h)?;
+                let max = u16::try_from((1u32 << bits.min(16)) - 1).unwrap_or(u16::MAX);
+                // the shallower side's samples move up to the deeper depth (8 → 10: × 4); a side
+                // already at that depth is read where it is (no copy)
+                let (sa, sb) = (bits - ba, bits - bb);
+                fn up(p: std::borrow::Cow<'_, [u16]>, s: u32) -> std::borrow::Cow<'_, [u16]> {
+                    if s == 0 { p } else { std::borrow::Cow::Owned(p.iter().map(|&v| v << s).collect()) }
+                }
+                let [ya, ua, va] = pa.map(|p| up(p, sa));
+                let [yb, ub, vb] = pb.map(|p| up(p, sb));
+                let aa = aa.map(|p| up(p, sa));
+                let ab = ab.map(|p| up(p, sb));
+                PixelData::Yuv16 {
+                    planes: [
+                        Arc::new(hstack_plane(&ya, &yb, w, h, 1, pool::take_u16(2 * w * h))?),
+                        Arc::new(hstack_plane(&ua, &ub, cw, ch, 1, pool::take_u16(2 * cw * ch))?),
+                        Arc::new(hstack_plane(&va, &vb, cw, ch, 1, pool::take_u16(2 * cw * ch))?),
+                    ],
+                    chroma: ca,
+                    bits,
+                    alpha: hstack_alpha(aa.as_deref(), ab.as_deref(), w, h, max)?.map(Arc::new),
+                }
+            }
+            _ => return None,
+        };
+        Some(VideoFrame { width, height: left.height, data, color: left.color, par: left.par, pts: left.pts })
+    }
+
+    /// A planar Y'CbCr frame's planes as 16-bit samples (8-bit ones as they are, not yet widened),
+    /// with its chroma, bit depth and alpha plane; `None` for RGBA frames.
+    #[allow(clippy::type_complexity)]
+    fn yuv16_view(&self) -> Option<([std::borrow::Cow<'_, [u16]>; 3], Chroma, u32, Option<std::borrow::Cow<'_, [u16]>>)> {
+        use std::borrow::Cow;
+        match &self.data {
+            PixelData::Yuv16 { planes, chroma, bits, alpha } => {
+                let bits = (*bits).min(16);
+                Some((
+                    [Cow::Borrowed(&planes[0][..]), Cow::Borrowed(&planes[1][..]), Cow::Borrowed(&planes[2][..])],
+                    *chroma,
+                    bits,
+                    alpha.as_deref().map(|a| Cow::Borrowed(&a[..])),
+                ))
+            }
+            PixelData::Yuv8 { planes, chroma, alpha } => {
+                let widen = |p: &[u8]| Cow::Owned(p.iter().map(|&v| u16::from(v)).collect());
+                Some(([widen(&planes[0]), widen(&planes[1]), widen(&planes[2])], *chroma, 8, alpha.as_deref().map(|a| widen(a))))
+            }
+            PixelData::Rgba8(_) | PixelData::RgbaF32(_) => None,
+        }
+    }
+
     /// Convert to premultiplied linear RGBA f32 (the compositor's working format).
     pub fn to_linear_f32(&self) -> Vec<f32> {
         self.to_linear_f32_decimated(1).2
@@ -820,6 +909,47 @@ fn crop_plane<T: Copy + Default>(src: &[T], w: usize, h: usize, n: usize, r: Reg
         o.copy_from_slice(&src[s..s + r.w * n]);
     }
     out
+}
+
+/// The size of one side's chroma planes for [`VideoFrame::hstack`] of two `w`×`h` frames; `None`
+/// when `w` splits a subsampled chroma sample (the two halves would share one).
+fn stacked_chroma_size(chroma: Chroma, w: usize, h: usize) -> Option<(usize, usize)> {
+    let (sx, sy) = chroma.shifts();
+    if !w.is_multiple_of(1 << sx) {
+        return None;
+    }
+    Some((w >> sx, h.div_ceil(1 << sy)))
+}
+
+/// Two `w`×`h` planes of `n`-element pixels side by side (`2w`×`h`), written into `out` (an empty
+/// buffer, recycled from [`pool`] where there is one), rows in parallel; `None` when either is
+/// shorter than its size says or the size overflows.
+fn hstack_plane<T: Copy + Default + Send + Sync>(a: &[T], b: &[T], w: usize, h: usize, n: usize, mut out: Vec<T>) -> Option<Vec<T>> {
+    let row = w.checked_mul(n)?;
+    let len = row.checked_mul(h)?;
+    let (Some(a), Some(b)) = (a.get(..len), b.get(..len)) else { return None };
+    if row == 0 {
+        return None;
+    }
+    out.clear();
+    out.resize(len.checked_mul(2)?, T::default());
+    out.par_chunks_exact_mut(2 * row).zip(a.par_chunks_exact(row)).zip(b.par_chunks_exact(row)).for_each(|((o, ra), rb)| {
+        let (left, right) = o.split_at_mut(row);
+        left.copy_from_slice(ra);
+        right.copy_from_slice(rb);
+    });
+    Some(out)
+}
+
+/// The alpha plane of two side-by-side `w`×`h` frames: `None` (inside `Some`) when neither has one,
+/// a missing side filled with `opaque`. The outer `None`: a plane shorter than its size says.
+fn hstack_alpha<T: Copy + Default + Send + Sync>(a: Option<&[T]>, b: Option<&[T]>, w: usize, h: usize, opaque: T) -> Option<Option<Vec<T>>> {
+    let len = w.checked_mul(h)?;
+    let full = vec![opaque; if a.is_some() != b.is_some() { len } else { 0 }];
+    match (a, b) {
+        (None, None) => Some(None),
+        (a, b) => hstack_plane(a.unwrap_or(&full[..]), b.unwrap_or(&full[..]), w, h, 1, Vec::new()).map(Some),
+    }
 }
 
 /// A `w`×`h` plane of `n`-element pixels turned clockwise by `q` (1–3) quarter turns.

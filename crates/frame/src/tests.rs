@@ -551,3 +551,84 @@ fn a_yuv8_picture_with_short_planes_converts_without_panicking() {
     assert!(row(3)[16..].iter().all(|v| *v == 0.0), "the rest of that row is transparent: {:?}", row(3));
     assert!((4..8).all(|y| row(y).iter().all(|v| *v == 0.0)), "rows without luma are transparent");
 }
+
+fn yuv16(w: u32, h: u32, chroma: Chroma, bits: u32, seed: u16) -> VideoFrame {
+    let (sx, sy) = chroma.shifts();
+    let (cw, ch) = ((w as usize).div_ceil(1 << sx), (h as usize).div_ceil(1 << sy));
+    let plane = |n: usize, k: u16| Arc::new((0..n).map(|i| (i as u16).wrapping_mul(7).wrapping_add(seed + k) & ((1 << bits) - 1)).collect::<Vec<u16>>());
+    let n = (w * h) as usize;
+    VideoFrame {
+        width: w,
+        height: h,
+        data: PixelData::Yuv16 { planes: [plane(n, 0), plane(cw * ch, 1), plane(cw * ch, 2)], chroma, bits, alpha: None },
+        color: ColorInfo::REC709,
+        par: (1, 1),
+        pts: Tick::ZERO,
+    }
+}
+
+/// Planes of a planar frame, row by row.
+fn yuv16_planes(f: &VideoFrame) -> ([Vec<u16>; 3], u32) {
+    match &f.data {
+        PixelData::Yuv16 { planes, bits, .. } => ([planes[0].to_vec(), planes[1].to_vec(), planes[2].to_vec()], *bits),
+        other => panic!("not 16-bit: {other:?}"),
+    }
+}
+
+#[test]
+fn hstack_puts_left_then_right_on_every_row_and_keeps_10_bit() {
+    for chroma in [Chroma::C420, Chroma::C422, Chroma::C444] {
+        let (a, b) = (yuv16(6, 4, chroma, 10, 0), yuv16(6, 4, chroma, 10, 300));
+        let s = VideoFrame::hstack(&a, &b).unwrap();
+        assert_eq!((s.width, s.height), (12, 4));
+        let ((pa, _), (pb, _), (ps, bits)) = (yuv16_planes(&a), yuv16_planes(&b), yuv16_planes(&s));
+        assert_eq!(bits, 10, "{chroma:?}: bit depth kept");
+        let (sx, sy) = chroma.shifts();
+        for (k, (w, h)) in [(6usize, 4usize), (6 >> sx, 4usize.div_ceil(1 << sy)), (6 >> sx, 4usize.div_ceil(1 << sy))].into_iter().enumerate() {
+            assert_eq!(ps[k].len(), 2 * w * h, "{chroma:?} plane {k}");
+            for y in 0..h {
+                assert_eq!(&ps[k][y * 2 * w..y * 2 * w + w], &pa[k][y * w..(y + 1) * w], "{chroma:?} plane {k} row {y}: left is lens 0");
+                assert_eq!(&ps[k][y * 2 * w + w..(y + 1) * 2 * w], &pb[k][y * w..(y + 1) * w], "{chroma:?} plane {k} row {y}: right is lens 1");
+            }
+        }
+    }
+}
+
+#[test]
+fn hstack_widens_an_8_bit_side_never_narrows_a_10_bit_one() {
+    let a = yuv16(4, 2, Chroma::C420, 10, 5);
+    let b8 = VideoFrame {
+        data: PixelData::Yuv8 { planes: [Arc::new(vec![200; 8]), Arc::new(vec![100; 2]), Arc::new(vec![50; 2])], chroma: Chroma::C420, alpha: None },
+        ..a.clone()
+    };
+    let s = VideoFrame::hstack(&a, &b8).unwrap();
+    let (p, bits) = yuv16_planes(&s);
+    assert_eq!(bits, 10);
+    assert_eq!(&p[0][4..8], &[800; 4], "8-bit 200 is 10-bit 800");
+    assert_eq!(p[1][2..4], [400, 400]);
+    let (pa, _) = yuv16_planes(&a);
+    assert_eq!(&p[0][..4], &pa[0][..4], "the 10-bit side is unchanged");
+    // two 8-bit sides stay 8-bit
+    let s = VideoFrame::hstack(&b8, &b8).unwrap();
+    assert!(matches!(s.data, PixelData::Yuv8 { .. }));
+    assert_eq!(s.width, 8);
+}
+
+#[test]
+fn hstack_refuses_frames_that_do_not_fit_side_by_side() {
+    let a = yuv16(6, 4, Chroma::C420, 10, 0);
+    // other size, other chroma, RGBA beside Y'CbCr, an odd width under 4:2:0, a short plane
+    assert!(VideoFrame::hstack(&a, &yuv16(6, 2, Chroma::C420, 10, 0)).is_none());
+    assert!(VideoFrame::hstack(&a, &yuv16(6, 4, Chroma::C444, 10, 0)).is_none());
+    assert!(VideoFrame::hstack(&a, &VideoFrame::rgba8(6, 4, vec![0; 96])).is_none());
+    assert!(VideoFrame::hstack(&yuv16(5, 4, Chroma::C420, 10, 0), &yuv16(5, 4, Chroma::C420, 10, 0)).is_none());
+    let mut short = a.clone();
+    if let PixelData::Yuv16 { planes, .. } = &mut short.data {
+        planes[0] = Arc::new(vec![0; 3]);
+    }
+    assert!(VideoFrame::hstack(&a, &short).is_none());
+    assert!(VideoFrame::hstack(&VideoFrame::rgba8(0, 0, vec![]), &VideoFrame::rgba8(0, 0, vec![])).is_none());
+    // RGBA beside RGBA works
+    let s = VideoFrame::hstack(&VideoFrame::rgba8(1, 1, vec![1, 2, 3, 4]), &VideoFrame::rgba8(1, 1, vec![5, 6, 7, 8])).unwrap();
+    assert_eq!(s.to_rgba8(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+}
