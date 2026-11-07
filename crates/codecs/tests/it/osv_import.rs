@@ -1,4 +1,5 @@
-//! DJI Osmo 360 `.OSV` import, phase 1 (docs/osv-notes.md).
+//! DJI Osmo 360 `.OSV` import, phase 1 (docs/osv-notes.md); the side-by-side frames of phase 2 are
+//! checked in `osv_dual_fisheye.rs`.
 //!
 //! - An ffmpeg-made stand-in (two real HEVC tracks, one per "lens", plus AAC) checks the whole open
 //!   path and that lens 0 decodes. ffmpeg is a fixture generator only.
@@ -30,10 +31,11 @@ fn ffmpeg_dual_hevc_osv_imports_as_dual_fisheye_and_lens_0_decodes() {
     let info = src.info();
     assert_eq!(info.spherical, Some(SphericalLayout::DualFisheye));
     let v = info.video.as_ref().unwrap();
-    assert_eq!((v.width, v.height, v.codec.as_str()), (128, 128, "HEVC"));
+    // phase 2: both 128×128 lenses side by side (osv_dual_fisheye.rs checks the pixels)
+    assert_eq!((v.width, v.height, v.codec.as_str()), (256, 128, "HEVC"));
     assert_eq!(info.audio_streams.len(), 1);
     let frame = src.video_frame(FrameRequest::full(Tick::ZERO)).unwrap();
-    assert_eq!((frame.width, frame.height), (128, 128));
+    assert_eq!((frame.width, frame.height), (256, 128));
 }
 
 fn real_sample() -> Option<PathBuf> {
@@ -60,7 +62,7 @@ fn real_osv_sample_imports_as_dual_fisheye() {
     // the fixture is 3 s long
     let secs = info.duration.seconds();
     assert!((2.5..3.5).contains(&secs), "duration {secs} s");
-    // lens 0 decodes (both lenses are recognised; lens 1 is not decoded in phase 1)
+    // both lenses decode, side by side (phase 2)
     let frame = src.video_frame(FrameRequest::full(Tick::ZERO)).unwrap();
     let v = info.video.as_ref().unwrap();
     assert_eq!((frame.width, frame.height), (v.width, v.height));

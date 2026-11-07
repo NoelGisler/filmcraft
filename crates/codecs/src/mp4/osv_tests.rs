@@ -85,7 +85,8 @@ fn osv_with_two_lenses_audio_and_metadata_is_dual_fisheye() {
     assert_eq!(info.spherical, Some(SphericalLayout::DualFisheye));
     assert_eq!(src.fisheye_lens_tracks(), Some([0, 1]));
     let v = info.video.as_ref().unwrap();
-    assert_eq!((v.width, v.height, v.codec.as_str()), (64, 64, "HEVC"));
+    // both 64×64 lenses side by side
+    assert_eq!((v.width, v.height, v.codec.as_str()), (128, 64, "HEVC"));
     assert_eq!(info.audio_streams.len(), 1, "the metadata track is not an audio stream");
     assert_eq!(info.audio().map(|a| (a.sample_rate, a.channels)), Some((48_000, 2)));
     assert_eq!(info.duration, filmcraft_time::Tick::from_units(3, 25));
@@ -157,7 +158,16 @@ fn metadata_track_is_skipped_whatever_it_holds() {
 #[test]
 fn damaged_osv_never_panics() {
     let good = build(&Spec::osv());
-    let try_open = |b: Vec<u8>| std::panic::catch_unwind(|| Mp4Source::open("damaged.osv", b.into()).map(|s| s.info().spherical)).is_ok();
+    // opening and asking both lenses for a frame (their samples don't decode: an error is fine)
+    let try_open = |b: Vec<u8>| {
+        std::panic::catch_unwind(|| {
+            Mp4Source::open("damaged.osv", b.into()).map(|s| {
+                let _ = s.video_frame(filmcraft_media::FrameRequest::full(filmcraft_time::Tick::ZERO));
+                s.info().spherical
+            })
+        })
+        .is_ok()
+    };
     for cut in (0..good.len()).step_by(7) {
         assert!(try_open(good[..cut].to_vec()), "panicked when cut at {cut}");
     }
